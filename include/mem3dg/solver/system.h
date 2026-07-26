@@ -383,6 +383,20 @@ public:
   void computeSelfAvoidanceForce();
 
   /**
+   * @brief Face-pair excluded-volume repulsion within this membrane.
+   *
+   * Unlike computeSelfAvoidanceForce(), which works vertex-to-vertex, this
+   * evaluates the true minimum distance between pairs of triangles (6
+   * vertex-face + 9 edge-edge sub-cases) and decomposes the resulting force
+   * onto the six involved vertices with DDG barycentric weights.  That catches
+   * two faces approaching edge-on or face-on, which a vertex-only test misses.
+   *
+   * Reads P.selfAvoidance.{d, mu}; accumulates into forces.mechanicalForceVec
+   * and forces.selfAvoidanceForceVec.  Defined in solver/face_repulsion.cpp.
+   */
+  void computeFaceFaceRepulsionForce();
+
+  /**
    * @brief Compute external force component of the system
    */
   EigenVectorX3dr prescribeExternalForce();

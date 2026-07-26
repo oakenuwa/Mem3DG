@@ -157,6 +157,20 @@ endif()
 add_library(mem3dg SHARED $<TARGET_OBJECTS:mem3dg_objlib>)
 target_link_libraries(mem3dg PUBLIC mem3dg_objlib)
 
+# ##############################################################################
+# OPTIONAL: plain-C ABI facade (mem3dg_c.h) for embedding in C++11 hosts
+# (e.g. Cytosim) without leaking geometry-central / Eigen / C++20.
+# The single symbol boundary is added directly into libmem3dg.{so,dylib}.
+# The header installs automatically via the include/mem3dg directory rule below.
+# ##############################################################################
+option(BUILD_C_API "Build the plain-C ABI facade (mem3dg_c.h)" ON)
+if(BUILD_C_API)
+  # Compiled into the object library so the extern "C" symbols land in the
+  # shared library with default visibility.
+  target_sources(mem3dg_objlib
+                 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/capi/mem3dg_c.cpp)
+endif()
+
 if(BUILD_PYMEM3DG)
   find_package(
     Python

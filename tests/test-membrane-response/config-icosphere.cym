@@ -1,0 +1,64 @@
+% Coupled Cytosim + Mem3DG -- CLOSED membrane, filaments CONFINED INSIDE
+%
+% Membrane: ../icosphere.obj, R=0.8, 642 v / 1280 f, closed (Euler 2).
+%
+% Run this with the driver's steric mode = 1 (one-sided wall), which keeps
+% filaments inside the membrane and pushes the membrane outward.  See
+% run-icosphere.sh.
+%
+% GEOMETRY -- why these numbers
+%   Filaments are SEEDED inside r < 0.6, well within the membrane at r = 0.8,
+%   so the membrane is what actually confines them.  The Cytosim `cell' space is
+%   deliberately LARGER (r = 1.2) and acts only as a loose outer safety net; if
+%   it were tighter than the membrane it would do the confining and the membrane
+%   force would never be tested.
+%
+%   Filaments GROW, so they press progressively harder against the membrane and
+%   inflate it -- the actin-pushing-a-membrane picture.
+%
+% The driver parses this with Run=0, so no `run' command here.
+
+set simul system
+{
+    time_step  = 0.000025
+    viscosity  = 0.05
+    % filament-filament excluded volume: keeps the growing network spread out
+    % so it presses on the membrane broadly instead of bundling in one spot.
+    % (also silences "actin:steric is set but simul:steric = 0")
+    steric     = 1, 200
+}
+
+set space cell
+{
+    shape = sphere
+}
+
+new space cell
+{
+    radius = 1.2
+}
+
+set fiber actin
+{
+    % very stiff (microtubule-like, ~400x actin): a stiff filament does
+    % not buckle when it meets the membrane, so it keeps pushing
+    rigidity     = 0.5
+    segmentation = 0.1
+    steric       = 1, 0.01
+    confine      = inside, 100, cell
+
+    % steady elongation: presses harder on the membrane over time
+    activity        = grow
+    growing_speed   = 4.0
+    growing_force   = 1.7
+    shrinking_speed = 0
+}
+
+% seeded strictly inside the membrane: `ball 0.6' is uniform in that volume
+new 2 fiber actin
+{
+    length   = 0.5
+    position = ball 0.3
+    % without this both ends start `white' (static) and nothing elongates
+    plus_end = grow
+}

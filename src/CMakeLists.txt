@@ -31,5 +31,10 @@ set(DDG_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/solver/integrator/velocity_verlet.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/solver/integrator/forward_euler.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/solver/integrator/conjugate_gradient.cpp"
+    # excluded-volume repulsion: face-face / edge-face within one membrane,
+    # between two membranes, and filament-edge vs membrane-face
+    "${CMAKE_CURRENT_SOURCE_DIR}/solver/face_repulsion.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/solver/multi_membrane.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/coupled/edge_face_contact.cpp"
     PARENT_SCOPE
 )

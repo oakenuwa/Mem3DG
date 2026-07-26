@@ -158,3 +158,5 @@ imgui.ini
 *.ply
 *.nc
 Testing
+*.obj
+*.txt

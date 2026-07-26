@@ -1,0 +1,113 @@
+% VARIANT of config.cym with filaments, so hands actually bind.
+% Exercises the `bound' and `bridge' point classes in points_%04d.txt --
+% config.cym has no fibers, so everything there stays `free'.
+%
+% Singles and couples placed ON / INSIDE a Mem3DG membrane
+%
+% `shape = mem3dg' exposes the membrane the driver owns through Cytosim's
+% Space interface, so the ordinary placement and confinement keywords work.
+%
+% Cytosim's base Space derives everything from three primitives, all of which
+% SpaceMem3DG forwards to libmem3dg:
+%     place()        -> boundaries() + inside()      "position = inside"
+%     placeOnEdge(R) -> boundaries() + project()     "position = surface R"
+%     bounce()       -> project()    + inside()      "confine = inside"
+%
+% NOTE singles/couples accept only off | on/surface | inside.  Cytosim has no
+% `outside' key for them (only fibers do) -- see single_prop.cc.
+
+set simul system
+{
+    time_step  = 0.000025
+    viscosity  = 0.05
+}
+
+set space membrane
+{
+    shape = mem3dg
+}
+new space membrane
+
+% ---- hands -----------------------------------------------------------------
+set hand binder
+{
+    binding_rate  = 50
+    binding_range = 0.05
+    unbinding_rate = 0.05
+}
+
+% ---- singles: some pinned ON the surface, some free INSIDE -----------------
+set single surfaceAnchor
+{
+    hand    = binder
+    % `fixed' singles are pinned where they are created, so Cytosim rejects a
+    % `confine' on them -- `position = surface' below is what puts them on the
+    % membrane
+    activity = fixed
+}
+
+set single surfaceDiffuser
+{
+    hand    = binder
+    activity = diffuse
+    diffusion = 0.05
+    confine = on, 0, membrane
+}
+
+set single innerDiffuser
+{
+    hand    = binder
+    activity = diffuse
+    diffusion = 0.05
+    confine = inside, 0, membrane
+}
+
+% ---- couples: confined to the surface --------------------------------------
+set couple surfaceCross
+{
+    hand1 = binder
+    hand2 = binder
+    stiffness = 100
+    diffusion = 0.05
+    confine = on, 0, membrane
+}
+
+set couple innerCross
+{
+    hand1 = binder
+    hand2 = binder
+    stiffness = 100
+    diffusion = 0.05
+    confine = inside, 0, membrane
+}
+
+set fiber actin
+{
+    % very stiff (microtubule-like, ~400x actin): a stiff filament does
+    % not buckle when it meets the membrane, so it keeps pushing
+    rigidity     = 0.5
+    segmentation = 0.1
+    steric       = 1, 0.01
+    confine      = inside, 100, membrane
+
+    % steady elongation: presses harder on the membrane over time
+    activity        = grow
+    growing_speed   = 4.0
+    growing_force   = 1.7
+    shrinking_speed = 0
+}
+
+% seeded strictly inside the membrane: `ball 0.6' is uniform in that volume
+new 2 fiber actin
+{
+    length   = 0.5
+    position = ball 0.3
+    % without this both ends start `white' (static) and nothing elongates
+    plus_end = grow
+}
+
+new 200 single surfaceAnchor   { position = surface 0.01 }
+new 100 single surfaceDiffuser { position = surface 0.01 }
+new 100 single innerDiffuser { position = inside }
+new 150 couple surfaceCross  { position = surface 0.01 }
+new  50 couple innerCross    { position = inside }
