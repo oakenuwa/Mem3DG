@@ -40,10 +40,12 @@
 // =============================================================================
 
 #include "mem3dg/macros.h"
+#include "mem3dg/solver/face_bvh.h"
 #include "mem3dg/solver/face_repulsion.h"
 #include "mem3dg/solver/integrator/forward_euler.h"
 #include "mem3dg/solver/system.h"
 
+#include <memory>
 #include <vector>
 
 namespace mem3dg {
@@ -88,6 +90,23 @@ struct InterMembraneParams {
 // ---------------------------------------------------------------------------
 DLL_PUBLIC void computeInterMembraneRepulsionForce(
     System &A, System &B, const InterMembraneParams &params);
+
+// ---------------------------------------------------------------------------
+// Same force, but using a prebuilt BVH over B's faces to find candidates
+// instead of scanning all nF_A * nF_B pairs.
+//
+// `bvhB` must be fitted to B's CURRENT positions (call refit() first) and must
+// not be stale with respect to B's topology (check needsRebuild()).  Passing
+// nullptr falls back to the exhaustive scan, so the plain 3-argument overload
+// above is just this with nullptr.
+//
+// The resulting forces are IDENTICAL to the exhaustive version, not merely
+// close: the BVH only prunes pairs whose padded boxes do not overlap, and those
+// are farther apart than d, where the harmonic force is exactly zero.
+// ---------------------------------------------------------------------------
+DLL_PUBLIC void computeInterMembraneRepulsionForce(
+    System &A, System &B, const InterMembraneParams &params,
+    const FaceBVH *bvhB);
 
 // ---------------------------------------------------------------------------
 // Driver that advances N membranes in lock-step with mutual face repulsion.
@@ -140,6 +159,11 @@ private:
 
   std::vector<Member> members_;
   InterMembraneParams params_;
+
+  /// One BVH per member, owned here and refitted at the top of every step().
+  /// Held by pointer because FaceBVH is not copyable-cheap and members_ can be
+  /// reordered by the caller via members().
+  std::vector<std::unique_ptr<FaceBVH>> bvh_;
 };
 
 } // namespace solver

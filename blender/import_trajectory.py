@@ -39,7 +39,10 @@ import bmesh
 # the `export_fibers` tool.
 # surface nucleation dataset (membrane + fibers + singles/couples).  Swap to
 # ".../test-membrane-response/frames-remesh" for the remeshed protrusion run.
-_TEST = "/Users/hakenuwa/Desktop/Mem3DG/tests/test-membrane-surface/frames-nucleate"
+_TEST = "/Users/hakenuwa/Desktop/Mem3DG/tests/test-membrane-response/frames-remesh"
+# _TEST = "/Users/hakenuwa/Desktop/Mem3DG/tests/test-multi-membrane/frames-approach"
+# _TEST = "/Users/hakenuwa/Desktop/Mem3DG/tests/test-multi-membrane/frames-inflate"
+
 MEMBRANE_DIR = _TEST     # membrane_%04d.obj
 FIBER_DIR    = _TEST     # fibers_%04d.txt
 
@@ -75,8 +78,34 @@ def _sorted_frames(directory, pattern):
     return files
 
 
+def load_membrane_series(directory):
+    """Return {label: [path per frame]} for every membrane sequence found.
+
+    Two naming conventions coexist:
+      membrane_%04d.obj      one membrane   (coupled_driver)
+      membrane<K>_%04d.obj   K-th of N      (multi_membrane_driver)
+
+    A single glob cannot cover both: "membrane_*.obj" does NOT match
+    "membrane0_0000.obj", because the character after "membrane" is a digit, not
+    the underscore. Multi-membrane runs were silently invisible in the viewer
+    for exactly that reason -- the files were written, nothing was imported.
+    """
+    series = {}
+    single = _sorted_frames(directory, "membrane_*.obj")
+    if single:
+        series["membrane"] = single
+    for path in _sorted_frames(directory, "membrane[0-9]*_*.obj"):
+        label = os.path.basename(path).rsplit("_", 1)[0]   # "membrane0"
+        series.setdefault(label, []).append(path)
+    for k in series:
+        series[k].sort()
+    if not series:
+        print("[import_trajectory] no membrane OBJs in", directory)
+    return series
+
+
 def load_membrane_frames(directory):
-    """Return the sorted list of membrane OBJ paths (one per frame)."""
+    """Back-compat single-sequence accessor."""
     files = _sorted_frames(directory, "membrane_*.obj")
     if not files:
         print("[import_trajectory] no membrane OBJs in", directory)
@@ -210,6 +239,32 @@ def build_point_clouds(blocks, coll, scale):
         obj.instance_type = 'VERTS'
 
 
+# distinct hues for membrane0, membrane1, ... so a multi-organelle scene is
+# readable at a glance; index parsed from the label's trailing digits
+_MEMBRANE_COLORS = [
+    (0.45, 0.62, 0.90, 1.0),
+    (0.90, 0.62, 0.40, 1.0),
+    (0.55, 0.85, 0.55, 1.0),
+    (0.85, 0.55, 0.80, 1.0),
+]
+
+
+def _membrane_material(label):
+    key = "cytosim_membrane_%s" % label
+    mat = bpy.data.materials.get(key)
+    if mat is None:
+        digits = "".join(c for c in label if c.isdigit())
+        idx = int(digits) if digits else 0
+        rgba = _MEMBRANE_COLORS[idx % len(_MEMBRANE_COLORS)]
+        mat = bpy.data.materials.new(key)
+        mat.use_nodes = True
+        bsdf = mat.node_tree.nodes.get("Principled BSDF")
+        if bsdf is not None:
+            bsdf.inputs["Base Color"].default_value = rgba
+        mat.diffuse_color = rgba
+    return mat
+
+
 def _clear_collection(coll):
     for obj in list(coll.objects):
         bpy.data.objects.remove(obj, do_unlink=True)
@@ -275,6 +330,7 @@ def import_membrane_obj(path, scale):
 
 # --- animation state, populated by setup() ---------------------------------
 _STATE = {
+    "membrane_series": {},
     "membrane_files": [],
     "fiber_files": [],
     "point_files": [],
@@ -286,23 +342,31 @@ _STATE = {
 
 def show_frame(frame_index):
     """Rebuild the scene for the given 0-based export frame index."""
-    mem_files = _STATE["membrane_files"]
+    mem_series = _STATE["membrane_series"]
     fib_files = _STATE["fiber_files"]
     pt_files = _STATE["point_files"]
     mem_coll = _STATE["membrane_coll"]
     fib_coll = _STATE["fiber_coll"]
     pt_coll = _STATE["point_coll"]
 
-    # membrane: clear then import the OBJ for this frame
-    if mem_coll is not None and 0 <= frame_index < len(mem_files):
+    # membranes: clear, then import this frame of every sequence.  One
+    # multi-membrane run has several, and they must all land in the same frame.
+    if mem_coll is not None and mem_series:
         _clear_collection(mem_coll)
-        # link imported object into our membrane collection
-        before = set(bpy.data.objects)
-        obj = import_membrane_obj(mem_files[frame_index], WORLD_SCALE)
-        if obj is not None:
+        for label in sorted(mem_series):
+            files = mem_series[label]
+            if not (0 <= frame_index < len(files)):
+                continue
+            obj = import_membrane_obj(files[frame_index], WORLD_SCALE)
+            if obj is None:
+                continue
+            obj.name = label
             for c in obj.users_collection:
                 c.objects.unlink(obj)
             mem_coll.objects.link(obj)
+            # give each membrane its own colour so neighbours are tellable apart
+            if len(mem_series) > 1:
+                obj.data.materials.append(_membrane_material(label))
 
     # fibers: clear then rebuild the curves for this frame
     if fib_coll is not None and 0 <= frame_index < len(fib_files):
@@ -324,7 +388,9 @@ def _frame_change_handler(scene):
 
 
 def setup():
-    _STATE["membrane_files"] = load_membrane_frames(MEMBRANE_DIR)
+    _STATE["membrane_series"] = load_membrane_series(MEMBRANE_DIR)
+    _STATE["membrane_files"] = next(
+        iter(sorted(_STATE["membrane_series"].items())), ("", []))[1]
     _STATE["fiber_files"] = _sorted_frames(FIBER_DIR, "fibers_*.txt")
     _STATE["point_files"] = _sorted_frames(POINT_DIR, "points_*.txt")
 

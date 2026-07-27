@@ -34,6 +34,7 @@ set(DDG_SOURCES
     # excluded-volume repulsion: face-face / edge-face within one membrane,
     # between two membranes, and filament-edge vs membrane-face
     "${CMAKE_CURRENT_SOURCE_DIR}/solver/face_repulsion.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/solver/face_bvh.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/solver/multi_membrane.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/coupled/edge_face_contact.cpp"
     PARENT_SCOPE
