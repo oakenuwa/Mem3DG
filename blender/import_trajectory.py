@@ -39,9 +39,10 @@ import bmesh
 # the `export_fibers` tool.
 # surface nucleation dataset (membrane + fibers + singles/couples).  Swap to
 # ".../test-membrane-response/frames-remesh" for the remeshed protrusion run.
-_TEST = "/Users/hakenuwa/Desktop/Mem3DG/tests/test-membrane-response/frames-remesh"
+# _TEST = "/Users/hakenuwa/Desktop/Mem3DG/tests/test-membrane-response/frames-remesh"
 # _TEST = "/Users/hakenuwa/Desktop/Mem3DG/tests/test-multi-membrane/frames-approach"
 # _TEST = "/Users/hakenuwa/Desktop/Mem3DG/tests/test-multi-membrane/frames-inflate"
+_TEST = "/Users/hakenuwa/Desktop/Mem3DG/tests/test-nucleation-anchor/frames-steric"
 
 MEMBRANE_DIR = _TEST     # membrane_%04d.obj
 FIBER_DIR    = _TEST     # fibers_%04d.txt
@@ -69,7 +70,16 @@ POINT_STATE_COLOR = {
     "free":   (0.55, 0.55, 0.60, 0.55),
     "bound":  (0.95, 0.55, 0.10, 1.0),
     "bridge": (0.90, 0.10, 0.10, 1.0),
+    # an ATTACHED single exports two points: its anchor (e.g. on the membrane)
+    # and the hand gripping the filament.  Different colours so the link stretch
+    # between them is readable at a glance.
+    "anchor": (0.20, 0.70, 0.95, 1.0),
+    "hand":   (0.95, 0.35, 0.10, 1.0),
 }
+
+# Membrane appearance.  Semi-transparent by default: a solid shell hides every
+# filament inside it, which is almost never what you want to look at.
+MEMBRANE_COLOR = (0.60, 0.68, 0.80, 0.25)
 # ===========================================================================
 
 
@@ -254,13 +264,22 @@ def _membrane_material(label):
     mat = bpy.data.materials.get(key)
     if mat is None:
         digits = "".join(c for c in label if c.isdigit())
-        idx = int(digits) if digits else 0
-        rgba = _MEMBRANE_COLORS[idx % len(_MEMBRANE_COLORS)]
+        if digits:
+            rgba = _MEMBRANE_COLORS[int(digits) % len(_MEMBRANE_COLORS)]
+        else:
+            rgba = MEMBRANE_COLOR          # the single-membrane case
         mat = bpy.data.materials.new(key)
         mat.use_nodes = True
         bsdf = mat.node_tree.nodes.get("Principled BSDF")
         if bsdf is not None:
             bsdf.inputs["Base Color"].default_value = rgba
+            if rgba[3] < 1.0 and "Alpha" in bsdf.inputs:
+                bsdf.inputs["Alpha"].default_value = rgba[3]
+        if rgba[3] < 1.0:
+            mat.blend_method = 'BLEND'
+            # show the far side of the shell too, so the membrane reads as a
+            # closed surface rather than a flat disc
+            mat.use_backface_culling = False
         mat.diffuse_color = rgba
     return mat
 
@@ -364,9 +383,10 @@ def show_frame(frame_index):
             for c in obj.users_collection:
                 c.objects.unlink(obj)
             mem_coll.objects.link(obj)
-            # give each membrane its own colour so neighbours are tellable apart
-            if len(mem_series) > 1:
-                obj.data.materials.append(_membrane_material(label))
+            # ALWAYS assign a material.  Previously this only happened when
+            # there was more than one membrane, so a single-membrane run got an
+            # untextured opaque mesh that simply hid the filaments inside it.
+            obj.data.materials.append(_membrane_material(label))
 
     # fibers: clear then rebuild the curves for this frame
     if fib_coll is not None and 0 <= frame_index < len(fib_files):

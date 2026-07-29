@@ -1,0 +1,127 @@
+% ============================================================================
+% 100 membrane-anchored nucleators in a 1 um patch, filaments growing along the
+% INWARD NORMAL, enclosed by a Mem3DG icosphere.
+%
+% WITHOUT filament-filament steric interaction.  See config-steric.cym for the
+% identical run with it switched on -- that pair is the whole experiment.
+%
+% The ONLY difference between the two files is the `steric' line in `set simul'.
+% Filament-MEMBRANE steric is still active in both: it is applied by the driver
+% through the Mem3DG C ABI and is not affected by this switch.
+%
+% GEOMETRY.  The membrane is the R = 0.8 um icosphere, so a filament launched
+% normal to the surface at the north pole aims straight at the sphere centre.
+% Every nucleator in the patch does the same, so the 100 filaments CONVERGE on
+% the origin.  That focus is where filament-filament steric has to matter: with
+% it off they pass through one another, with it on they must splay.
+%
+% PATCH SIZE.  For a patch of 1 um DIAMETER on the R = 0.8 um sphere the rim
+% sits at z = sqrt(0.8^2 - 0.5^2) = 0.62450, so the patch is {z > 0.6245}.
+%
+% That is imposed with `placement's third argument, a condition in X/Y/Z/R that
+% rejects any trial position outside the cap.  The obvious alternative --
+% `position = cap 0.8 0.1755' -- does NOT work: it generates points at radius
+% exactly 0.8, but the mesh is a POLYHEDRON inscribed in that sphere (measured
+% inradius 0.796377), so every such point lies outside the membrane and Cytosim
+% rejects all 1024 trials.  Sampling `surface' and filtering by z avoids the
+% problem entirely and puts the nucleators on the real triangulated surface to
+% machine precision.
+% ============================================================================
+
+set simul system
+{
+    time_step = 0.00005
+    viscosity = 0.05
+
+    % ---- FILAMENT-FILAMENT STERIC: OFF -------------------------------------
+    % Mode 0 disables Cytosim's fiber-fiber engine entirely, so filaments pass
+    % straight through one another where they converge.  This is the ONLY
+    % functional difference from config-steric.cym.
+    %
+    % Filament-MEMBRANE steric is unaffected: the driver computes it through the
+    % Mem3DG C ABI and never consults simul:steric.
+    steric = 0
+}
+
+set space membrane
+{
+    shape = mem3dg
+}
+new space membrane
+
+% ---- the filament that gets nucleated ---------------------------------------
+% must precede the `seeder' hand: `nucleate' resolves to a fiber class at parse
+% time
+set fiber actin
+{
+    rigidity     = 0.075          % ~ actin, 0.0075 pN.um^2 would be stiffer
+    segmentation = 0.05
+
+    % Left identical to config-steric.cym so the two fiber classes match in
+    % every respect; it has no effect while simul:steric = 0.
+    steric       = 1, 0.01
+
+    confine      = inside, 100, membrane
+
+    activity        = grow
+    growing_speed   = 2.0
+    growing_force   = 1.7
+    shrinking_speed = 0
+}
+
+% ---- the nucleator ----------------------------------------------------------
+set hand seeder
+{
+    % no binding to existing filaments: this hand exists only to nucleate, and
+    % letting it grab neighbours would couple the filaments through a second
+    % mechanism and confound the steric comparison
+    binding_rate   = 0
+    binding_range  = 0.01
+    unbinding_rate = 0
+
+    activity = nucleate
+    nucleate = 200, actin, (length=0.05; plus_end=grow;)
+
+    % Grow along the INWARD normal of the confining space, rather than tangent
+    % (`nucleate_in_plane') or random.  SpaceMem3DG answers normalToEdge() from
+    % the angle-weighted pseudonormal, so this works on the membrane exactly as
+    % it would on a built-in sphere.
+    nucleate_normal = 1
+
+    % hold_end defaults to minus_end: the nucleator keeps hold of the filament
+    % it makes and therefore never fires again.  That is what caps the run at
+    % exactly one filament per nucleator instead of a runaway.
+    hold_end = minus_end
+}
+
+set single nucleator
+{
+    hand = seeder
+
+    % STIFFNESS IS REQUIRED.  single:stiffness defaults to ZERO, which means the
+    % hand is attached in Cytosim's bookkeeping but NO force holds the filament
+    % to its anchor -- the filament simply drifts away.  Measured with the
+    % default: the minus end wandered up to 0.735 um from its nucleator by the
+    % end of the run, i.e. further than the filament's own length.
+    %
+    % 2000 pN/um is a stiff clamp: it keeps the minus end within a few nm of the
+    % anchor while the filament pushes on the membrane.
+    stiffness = 2000
+
+    % `fixed' pins the nucleator in the LAB frame and forbids diffusion.  It
+    % does not track the membrane if the membrane moves, but that is harmless
+    % here: each nucleator fires once, within the first few ms, while the sphere
+    % is still undeformed, so the launch normal is taken from the intended
+    % geometry either way.
+    activity = fixed
+}
+
+% 100 nucleators on a 1 um-diameter patch at the +Z pole.
+%   position  = surface           -> project onto the membrane (exact)
+%   placement = surface, membrane, (Z > 0.6245)
+%                                 -> re-project, and reject trials outside the cap
+new 100 single nucleator
+{
+    position  = surface
+    placement = surface, membrane, (Z > 0.6245)
+}

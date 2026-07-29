@@ -347,13 +347,30 @@ static void savePointFrame(Simul const& simul, const std::string& dir, int frame
     // order stable from frame to frame, so Blender materials stay put
     std::map<std::string, std::vector<Vector> > classes;
 
-    for ( int s = 0; s < 2; ++s )
+    /*
+     A single has TWO meaningful positions once it is attached, and exporting
+     only one hides the thing you usually want to see:
+
+       posFoot() -- the anchor.  For a `fixed' single (Picket) this is the point
+                    it was created at, e.g. on the membrane.
+       posHand() -- where its hand grips the filament.
+
+     While free the two coincide, so one point is enough and it is emitted as
+     `free'.  Once attached they separate by the link stretch, and BOTH are
+     emitted -- as `anchor' and `hand' -- so the viewer shows the anchor on the
+     membrane and the grip on the filament as two distinct clouds.  With
+     single:stiffness = 0 the separation is unbounded, which is exactly the
+     failure this export makes visible.
+    */
+    for ( Single const* S = simul.singles.firstF(); S; S = S->next() )
+        classes[std::string("single ") + S->prop->name() + " free"]
+            .push_back(S->position());
+
+    for ( Single const* S = simul.singles.firstA(); S; S = S->next() )
     {
-        const char* state = s ? "bound" : "free";
-        Single const* head = s ? simul.singles.firstA() : simul.singles.firstF();
-        for ( Single const* S = head; S; S = S->next() )
-            classes[std::string("single ") + S->prop->name() + " " + state]
-                .push_back(S->position());
+        const std::string base = std::string("single ") + S->prop->name();
+        classes[base + " anchor"].push_back(S->posFoot());
+        classes[base + " hand"].push_back(S->posHand());
     }
 
     // free-free, one hand bound (either way), and bridging both filaments
