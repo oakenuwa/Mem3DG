@@ -40,9 +40,14 @@ import bmesh
 # surface nucleation dataset (membrane + fibers + singles/couples).  Swap to
 # ".../test-membrane-response/frames-remesh" for the remeshed protrusion run.
 # _TEST = "/Users/hakenuwa/Desktop/Mem3DG/tests/test-membrane-response/frames-remesh"
-# _TEST = "/Users/hakenuwa/Desktop/Mem3DG/tests/test-multi-membrane/frames-approach"
+_TEST = "/Users/hakenuwa/Desktop/Mem3DG/tests/test-multi-membrane/frames-approach"
 # _TEST = "/Users/hakenuwa/Desktop/Mem3DG/tests/test-multi-membrane/frames-inflate"
-_TEST = "/Users/hakenuwa/Desktop/Mem3DG/tests/test-nucleation-anchor/frames-steric"
+# _TEST = "/Users/hakenuwa/Desktop/Mem3DG/tests/test-nucleation-anchor/frames-steric-follow"
+
+# Overridable without editing this file, so a batch driver can point the same
+# script at every dataset in turn:  MEM3DG_FRAMES=/path/to/frames blender ...
+# Falls back to the _TEST above when unset, so interactive use is unchanged.
+_TEST = os.environ.get("MEM3DG_FRAMES", _TEST)
 
 MEMBRANE_DIR = _TEST     # membrane_%04d.obj
 FIBER_DIR    = _TEST     # fibers_%04d.txt

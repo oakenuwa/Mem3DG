@@ -160,3 +160,24 @@ imgui.ini
 Testing
 *.obj
 *.txt
+tests/test-branching/*
+tests/test-membrane*
+tests/test-multi-membrane*/*
+tests/test-nucleation-anchor/*
+tests/test-nucleation-patch/*
+blender/
+blender-output/
+
+# `*.txt' above is aimed at simulation output, but it also swallows every
+# CMakeLists.txt -- a build file, not build output.  The existing ones (root,
+# src/, python_src/, ...) are unaffected only because they were already tracked
+# when the rule landed, and ignore rules never apply to tracked files.  Any
+# CMakeLists.txt added to a NEW subdirectory since then has been invisible, and
+# silently so: the build works locally and the file is simply missing from the
+# clone.  That is how coupled_driver/ and tests/test-multi-membrane/ ended up
+# untracked.
+#
+# Safe against build trees: `build/' is excluded as a DIRECTORY (line 12), and
+# git cannot re-include a file whose parent directory is excluded, so generated
+# CMakeLists.txt under a build tree stays ignored.
+!CMakeLists.txt

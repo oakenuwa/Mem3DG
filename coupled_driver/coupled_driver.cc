@@ -429,6 +429,10 @@ int main(int argc, char* argv[])
     int    remesh      = 0;           ///< 1 = adaptive remeshing (resolves tubes
                                       ///  properly instead of resisting them)
     int    remeshEvery = 50;          ///< remesh every N steps
+    int    anchorFollow= 0;           ///< 1 = re-project anchored single feet
+                                      ///  onto the membrane every step, so they
+                                      ///  track it instead of staying pinned in
+                                      ///  the lab frame
     double maxEdge     = 0.0;         ///< split edges longer than this (0 = auto)
     StericParams sp;
 
@@ -449,6 +453,7 @@ int main(int argc, char* argv[])
     if ( argc > 15) remesh    = std::atoi(argv[15]);
     if ( argc > 16) maxEdge   = std::atof(argv[16]);
     if ( argc > 17) remeshEvery = std::atoi(argv[17]);
+    if ( argc > 18) anchorFollow= std::atoi(argv[18]);
 
     // --- set up Mem3DG -------------------------------------------------------
     mem3dg_system* mem = mem3dg_system_create_from_file(
@@ -665,6 +670,50 @@ int main(int argc, char* argv[])
         }
         else
             mem3dg_system_step(mem, dt);
+
+        /*
+         MEMBRANE-FOLLOWING ANCHORS.
+
+         Cytosim's Anchor and Picket pin their foot in the LAB frame: sPos is set
+         once at placement and never moves.  That is wrong for a membrane-bound
+         nucleator -- as the membrane deforms it slides out from under the foot,
+         the elastic link stretches, and the filament ends up held at a point
+         that is no longer on the surface.
+
+         Re-projecting each foot onto the current surface makes it track the
+         membrane instead, which is what a formin or an Arp2/3 complex actually
+         does.  It also changes the mechanics qualitatively: with the feet pinned
+         in the lab frame the membrane load is set by the PLACEMENT and nothing
+         the filaments do to each other can move it, whereas a foot that lives on
+         the surface can be repositioned as its filament is pushed around.
+
+         Done AFTER the membrane has advanced, so the feet land on the new
+         surface, and before the next iteration reads positions to build forces.
+         Applies to both the free and attached lists: Anchor::position() returns
+         the foot either way, and Anchor::setPosition() writes sPos directly.
+        */
+        if ( anchorFollow )
+        {
+            for ( int pass = 0; pass < 2; ++pass )
+            {
+                Single * sgl = pass ? simul.singles.firstA() : simul.singles.firstF();
+                for ( ; sgl; sgl = sgl->next() )
+                {
+                    /*
+                     Only feet that are actually anchored somewhere.  A plain
+                     diffusing Single has no foot -- its position() IS its hand
+                     on the fiber -- so projecting it would drag the filament
+                     rather than the anchor.
+                     */
+                    if ( ! sgl->hasLink() )
+                        continue;
+                    Vector p = sgl->position();
+                    double prj[3];
+                    if ( 0 == mem3dg_system_project(mem, p.XX, p.YY, p.ZZ, prj, nullptr) )
+                        sgl->setPosition(Vector(prj[0], prj[1], prj[2]));
+                }
+            }
+        }
 
         // export both sides at the same instant, under the same frame index
         if ( saveEvery > 0 && s % saveEvery == 0 )

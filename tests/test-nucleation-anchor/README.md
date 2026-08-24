@@ -92,6 +92,13 @@ tip; the minus end reaches 0.13 from the centre.
 The 40–57° tilt is real reorientation, not a launch error: a filament pinned at
 its tip with a free body, in a converging bundle of 100, tilts under load.
 
+> **Resolution caveat, added after the deformation runs below.** The numbers in
+> this section were computed on the un-remeshed 642-vertex mesh, which
+> **under-resolves the filament-membrane contact by ~20x in force**. The
+> steric on/off comparison is still valid (both sides used the same mesh), but
+> the absolute forces and deformation magnitudes here are understated. See
+> "Resolution: the coarse mesh was wrong" below.
+
 ## Result — does fiber-fiber steric change anything?
 
 At the last frame, over all 4950 filament pairs. Steric radius 0.01 µm, so two
@@ -156,3 +163,138 @@ filament). It originally summed both and reported 101/103 nucleators for 100.
 
 `blender/import_trajectory.py` picks up `membrane_%04d.obj`, `fibers_%04d.txt`
 and `points_%04d.txt` from either directory unchanged.
+
+
+---
+
+# High filament-membrane repulsion, with remeshing
+
+Same two configs, driven hard enough to deform the membrane, with adaptive
+remeshing on:
+
+```bash
+coupled_driver config-steric.cym    ../icosphere.obj 12000 0.05 100 1 400 frames-steric-deform    1 8.22e-6 100 100 0.98 0.0 1 0.12 100
+coupled_driver config-no-steric.cym ../icosphere.obj 12000 0.05 100 1 400 frames-no-steric-deform 1 8.22e-6 100 100 0.98 0.0 1 0.12 100
+```
+
+Shell 0.05 (14x the earlier 0.0035), stiffness 100, remeshing every 100 steps at
+`maxEdge = 0.12`.
+
+## Calibration: stiffness is the wrong lever
+
+Raising the steric *stiffness* **reduces** the force it delivers, because a
+stiffer wall ejects the filament tip out of the interaction shell and it then
+feels nothing. Contact counts over a 1500-step run, shell fixed at 0.0035:
+
+| stiffness | contacts, start -> end | \|F_mem\| end |
+|---|---|---|
+| 10 | 118 -> 87 | 1.4 |
+| 200 | 36 -> 5 | 3.3 |
+| 1000 | 8 -> **0** | **0** |
+
+At fixed shell the stiffness barely matters (shell 0.02 gives bulge +0.031 at
+both k=50 and k=200). The lever is the **shell width**, which is what keeps the
+point in range while it is being pushed:
+
+| shell | k | bulge | rms deviation | contacts |
+|---|---|---|---|---|
+| 0.0035 | 10 | +0.0043 | 0.0013 | 87 |
+| 0.02 | 50 | +0.0312 | 0.0061 | 23 |
+| 0.05 | 100 | +0.0631 | 0.0136 | 24 |
+| 0.08 | 150 | +0.0942 | 0.0209 | 27 |
+| 0.10 | 100 | +0.1140 | 0.0260 | 36 |
+
+Note the shell is a modelling choice, not a molecular radius: it is the
+clearance the one-sided wall enforces between filament and membrane.
+
+## Resolution: the coarse mesh was wrong
+
+Enabling remeshing changed `|F_mem|` from 12.4 to 327.8 at the same step with the
+same parameters and an essentially unchanged filament configuration (397 vs 415
+filament points). That is not remeshing corrupting the physics — the coarse mesh
+was under-resolving it. Holding physics fixed (shell 0.05, k 100, 800 steps) and
+varying only the mesh:
+
+| vertices | contacts | \|F_mem\| |
+|---|---|---|
+| 642 | 27 | 8.8 |
+| 1869 | 124 | 179.4 |
+| 2059 | 129 | 182.6 |
+| 5661 | 128 | 175.2 |
+| 8156 | 125 | 172.1 |
+
+Converged from 1869 onward — a further 4.4x refinement moves it 4%. The
+642-vertex mesh is the outlier, and the reason is countable:
+
+| mesh | faces | faces inside the 0.7 um patch | faces per filament tip |
+|---|---|---|---|
+| initial icosphere | 1280 | 62 | **0.62** |
+| remeshed, maxEdge 0.12 | 3734 | 2109 | 21.1 |
+| remeshed, maxEdge 0.06 | 11318 | 2585 | 25.9 |
+
+**The original mesh has fewer triangles in the patch than there are filaments**,
+so per-tip contact is not representable at all. Remeshing puts 56% of its faces
+into the 5% of surface area where the deformation is.
+
+Consequence: steric parameters calibrated at 1280 faces do not transfer to a
+remeshed run, and every earlier run in this directory had the filament-membrane
+force about 20x too low.
+
+## Result: the membrane deforms, and the deformation is localized
+
+642 -> 2923 (steric) / 2859 (no-steric) vertices. Radius by region at the last
+frame, initial radius 0.80:
+
+| region | vertices | mean r | max r |
+|---|---|---|---|
+| patch, z > 0.719 | 1299 | **0.8361** | **0.8520** |
+| equator | 1553 | 0.7915 | 0.8187 |
+| antipode, z < −0.719 | 71 | 0.7898 | 0.7929 |
+
+The patch bulges out ~0.036 µm on average and 0.052 µm at the peak, while the
+equator and the far pole pull in ~0.009 µm. That is volume-conserving
+redistribution under `Kv = 100`, and the protrusion is exactly where the
+nucleators are. Deformation rms is 0.0235 against 0.0034 for the earlier
+low-repulsion run — a 7x increase.
+
+The load relaxes as the membrane accommodates the tips: `|F_mem|` 46.8 at step
+4000, 19.9 at 8000, 12.2 at 12000.
+
+## Result: filament-filament steric does NOT change the membrane shape here
+
+The filament bodies are clearly separated by the steric engine:
+
+| | steric ON | steric OFF |
+|---|---|---|
+| pairs closer than 0.020 | **37** (0.7%) | **150** (3.0%) |
+| pairs closer than 0.010 | 7 | 34 |
+| 1st percentile of pair distance | 0.02152 | 0.01185 |
+| median pair distance | 0.22616 | 0.15695 |
+
+4.1x fewer overlaps, median spacing 44% larger. And yet the membrane is
+identical between the two runs:
+
+| | steric ON | steric OFF |
+|---|---|---|
+| patch mean r | 0.8361 | 0.8364 |
+| patch max r | 0.8520 | 0.8520 |
+| rms deviation | 0.0235 | 0.0234 |
+
+**Why, and why it is not a bug.** `activity = anchor` pins each foot in the lab
+frame with `stiffness = 2000`, and the plus end is held there. The membrane is
+loaded by those pinned tips pushing outward through the steric wall, so the tip
+positions — and therefore the load — are set by the *anchor placement*, not by
+what the filament bodies do to each other. Fiber-fiber steric rearranges the
+bodies in the lumen and does not move the tips.
+
+So this is a real negative result, not a failed run: in a plus-end-anchored
+geometry, filament-filament steric cannot influence membrane shape. To make it
+influence the membrane you need the loading points free to be repositioned by
+neighbour interactions — hold the **minus** end instead (growing tips free to
+press the far membrane), soften the anchor, or drop the anchors entirely.
+
+## Files
+
+- `frames-steric-deform/`, `frames-no-steric-deform/` — the runs above
+- `frames-steric/`, `frames-no-steric/` — plus-end held, low repulsion, no remeshing
+- `frames-steric-minus-end/`, `frames-no-steric-minus-end/` — minus-end held

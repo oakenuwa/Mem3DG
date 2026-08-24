@@ -67,7 +67,7 @@ set fiber actin
     % is half the area of the 1 um version, so base density is doubled.
     steric       = 1, 0.01
 
-    confine      = inside, 100, membrane
+    confine      = inside, 10, membrane
 
     activity        = grow
     growing_speed   = 2.0
@@ -138,6 +138,25 @@ set single nucleator
     % `length' is deliberately left unset: length > 0 selects AnchorLong (an
     % offset side-link) rather than the plain Anchor wanted here.
     activity = anchor
+
+    % RIDE THE DEFORMING MEMBRANE.
+    %
+    % Without this the anchor foot is pinned in the LAB frame, so as the membrane
+    % bulges it slides out from under the foot and the load point stops being on
+    % the surface.  That is not a cosmetic issue: it made the membrane shape
+    % depend only on where the anchors were PLACED, so filament-filament steric
+    % had no effect on the membrane at all (measured: patch mean radius 0.8361 vs
+    % 0.8364 with steric on/off).
+    %
+    % `confine = on' makes Anchor::followConfinement() re-project sPos onto the
+    % space every step, in both stepF() and stepA(); AnchorLong overrides stepA()
+    % and calls it explicitly for the same reason.  The projection is gated on
+    % CONFINE_ON, so `confine = inside' or no confinement keeps the classic
+    % lab-frame Anchor.
+    %
+    % The stiffness argument is 0 because nothing is being pushed back: the foot
+    % is re-seated by projection, not by a restoring force.
+    confine = on, 0, membrane
 }
 
 % 100 nucleators on a 0.7 um-diameter patch at the +Z pole.
