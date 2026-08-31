@@ -61,6 +61,28 @@
 
 //------------------------------------------------------------------------------
 
+/**
+
+
+   Cytosim  : (s, um, pN)   
+              energy = pN.um = 1e-18 J
+
+   Mem3DG   : lengths are um (the meshes are um-scale), and energies are
+              1e-15 J.  That second half is not guessed: pymem3dg/util.py's
+              femtoJToKBT() documents the energy unit as femtojoules, and it is
+              confirmed by the canonical Kb = 8.22e-5 used throughout the Mem3DG
+              tests --
+
+                  8.22e-5 * 1e-15 J = 8.22e-20 J
+                  kT (298 K)        = 1.38e-23 * 298 = 4.11e-21 J
+                  ratio             = 20.0  -> exactly 20 kT, as intended.
+
+              So Mem3DG's force unit is 1e-15 J / 1e-6 m = 1e-9 N = nN.
+
+ */
+static const double PN_PER_M3F = 1000.0;   ///< pN per Mem3DG force unit (nN)
+
+
 /// one filament-side force to be added inside Cytosim's solve
 struct FiberForce {
     Mecable const* mecable;   ///< the fiber owning the point
@@ -193,8 +215,10 @@ static long contactForces(Simul const&             simul,
             return 0;
         w.ptF.assign(nPts*3, 0.0);
 
+        // stiffness converted pN/um -> Mem3DG force/um, so the reaction this
+        // accumulates into the membrane buffer is in the membrane's own units
         long n = mem3dg_system_filament_confinement(
-            mem, &w.ptP[0], nPts, /*shell=*/p.cutoff, p.stiff,
+            mem, &w.ptP[0], nPts, /*shell=*/p.cutoff, p.stiff / PN_PER_M3F,
             &w.ptF[0], /*add_to_membrane=*/1);
 
         if ( n < 0 )
@@ -206,7 +230,10 @@ static long contactForces(Simul const&             simul,
 
         for ( size_t i = 0; i < nPts; ++i )
         {
-            const Vector f(w.ptF[3*i+0], w.ptF[3*i+1], w.ptF[3*i+2]);
+            // ...and converted back to pN on the way into Cytosim
+            const Vector f(w.ptF[3*i+0] * PN_PER_M3F,
+                           w.ptF[3*i+1] * PN_PER_M3F,
+                           w.ptF[3*i+2] * PN_PER_M3F);
             if ( f.normSqr() > 0 )
             {
                 FiberForce ff;
@@ -219,9 +246,19 @@ static long contactForces(Simul const&             simul,
         return n;
     }
 
+    /*
+     Same pN/um -> Mem3DG conversion as the confinement branch above.
+
+     NOTE this branch does NOT fold segF0/segF1 back onto the fiber points, so
+     mode 0 currently applies force to the MEMBRANE only -- `fiberForces' is
+     left empty and Cytosim feels nothing.  The block comment on this function
+     describes the folding that mode 1 does; it was never written for mode 0.
+     Left as-is rather than changed here, because this commit is about units and
+     wiring it up would alter what every existing mode-0 test does.
+     */
     long nContacts = mem3dg_system_filament_repulsion(
         mem, &w.segP0[0], &w.segP1[0], nSeg,
-        p.cutoff, p.stiff,
+        p.cutoff, p.stiff / PN_PER_M3F,
         &w.segF0[0], &w.segF1[0], /*add_to_membrane=*/1);
 
     if ( nContacts < 0 )
@@ -520,7 +557,10 @@ int main(int argc, char* argv[])
                 nVert, mem3dg_system_num_faces(mem));
     std::printf("splitting: %s\n",
                 strang ? "Strang (error ~dt^2)" : "Lie-Trotter (error ~dt)");
-    std::printf("bending:   Kb = %g\n", membraneKb);
+    std::printf("bending:   Kb = %g  (= %.3g kT at 298 K)\n",
+                membraneKb, membraneKb * 1e-15 / (1.38e-23 * 298.0));
+    std::printf("units:     Cytosim (s,um,pN); Mem3DG (s,um,%g pN); "
+                "steric stiffness read as pN/um\n", PN_PER_M3F);
     std::printf("steric:    %s\n", sp.mode==1
                 ? "one-sided wall (confine inside, push membrane out)"
                 : "symmetric repulsion (does not confine)");
@@ -743,8 +783,15 @@ int main(int argc, char* argv[])
                 fMem += std::sqrt(membraneForces[i]*membraneForces[i]
                                 + membraneForces[i+1]*membraneForces[i+1]
                                 + membraneForces[i+2]*membraneForces[i+2]);
+            /*
+             The buffer holds Mem3DG force units; report it in pN so that the
+             two columns are the SAME physical quantity and |F_fib| == |F_mem|
+             remains a real action-reaction check.  Without this the fix above
+             would show a spurious 1000x mismatch.
+             */
+            fMem *= PN_PER_M3F;
 
-            std::printf("step %4d  contacts %5ld  |F_fib| %.4g  |F_mem| %.4g  t_mem %.6g\n",
+            std::printf("step %4d  contacts %5ld  |F_fib| %.4g pN  |F_mem| %.4g pN  t_mem %.6g\n",
                         s, nContacts, fFib, fMem, mem3dg_system_time(mem));
         }
     }

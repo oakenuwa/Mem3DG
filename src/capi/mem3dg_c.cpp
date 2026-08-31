@@ -376,9 +376,7 @@ namespace {
 
 /**
  Count how many times a ray from `q` along `dir` crosses the surface.
- Moller-Trumbore per triangle.  `grazing` is set if any hit lands very close to
- a triangle edge, which means the count may be unreliable and the caller should
- retry with a different direction.
+ Moller-Trumbore per triangle. 
  */
 int rayCrossings(gcs::ManifoldSurfaceMesh &mesh,
                  gcs::VertexPositionGeometry &vpg, const Eigen::Vector3d &q,
@@ -429,8 +427,7 @@ int rayCrossings(gcs::ManifoldSurfaceMesh &mesh,
 /// robust inside test: retry with other directions if a cast grazes an edge
 bool pointInside(gcs::ManifoldSurfaceMesh &mesh,
                  gcs::VertexPositionGeometry &vpg, const Eigen::Vector3d &q) {
-  // deliberately irrational-ish directions, so hitting an edge exactly is
-  // improbable; three independent tries make it vanishingly so
+  
   static const Eigen::Vector3d dirs[3] = {
       Eigen::Vector3d(0.5773502692, 0.5772156649, 0.5774996669).normalized(),
       Eigen::Vector3d(0.2617993878, -0.9510565163, 0.1650670970).normalized(),
@@ -482,15 +479,10 @@ struct SurfaceHit {
  Instead of scanning every face, take the K nearest VERTICES and test only the
  faces incident to them.  For a well-shaped mesh the closest face touches one of
  the closest few vertices, so K=8 is ample; the brute-force path is kept in the
- tests as an oracle.
+ tests.
 
  The returned normal is the ANGLE-WEIGHTED PSEUDONORMAL, not the raw face
- normal.  For a closest point that lands strictly inside a face the two agree,
- but on an edge or at a vertex the face normal is ambiguous and gives the wrong
- side -- the pseudonormal is the standard construction (Baerentzen & Aanaes)
- that makes sign(dot(q - point, normal)) correct everywhere on a closed mesh.
- That is what lets inside/outside be answered from this one query instead of
- casting a ray.
+ normal.
  */
 SurfaceHit closestOnSurface(Impl *impl, const Eigen::Vector3d &q,
                             std::size_t K = 8) {
@@ -813,7 +805,7 @@ long mem3dg_system_filament_repulsion(mem3dg_system *h, const double *seg_p0,
 
   const std::size_t nF = mesh.nFaces();
 
-  // outputs are overwritten, not accumulated
+  // outputs are overwritten
   if (out_f0)
     std::fill(out_f0, out_f0 + 3 * nSeg, 0.0);
   if (out_f1)
@@ -828,8 +820,7 @@ long mem3dg_system_filament_repulsion(mem3dg_system *h, const double *seg_p0,
                              seg_p1[3 * s + 2]);
 
     // cheap bound: nothing on this segment can reach a face whose centroid is
-    // farther than (half the segment length + cutoff + face radius) away.  The
-    // face radius is unknown here, so fold it into a generous slack factor.
+    // farther than (half the segment length + cutoff + face radius) away.
     const Eigen::Vector3d segMid = 0.5 * (p0 + p1);
     const double segReach = 0.5 * (p1 - p0).norm() + cutoff;
 
