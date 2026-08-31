@@ -286,6 +286,31 @@ static long contactForces(Simul const&             simul,
  reading objects.cmo -- see COORDINATES.md.  Both use the SAME frame index so
  Blender overlays them: membrane frame f and fiber frame f are the same instant.
  */
+/**
+ Total magnitude of the membrane-side external force, in pN.
+
+ Must be called while the external force buffer still holds the current
+ contact reaction -- i.e. after contactForces() and BEFORE the membrane step,
+ which zeroes the buffer whenever it remeshes.
+
+ `scratch` is resized as needed: remeshing changes the vertex count, and reading
+ into a buffer sized at startup would overflow.
+ */
+static double sumExternalForces(mem3dg_system* mem, std::vector<double>& scratch)
+{
+    const size_t nv = mem3dg_system_num_vertices(mem);
+    if ( scratch.size() != nv*3 )
+        scratch.assign(nv*3, 0.0);
+    mem3dg_system_get_external_forces(mem, &scratch[0]);
+
+    double s = 0;
+    for ( size_t i = 0; i + 2 < scratch.size(); i += 3 )
+        s += std::sqrt(scratch[i]*scratch[i] + scratch[i+1]*scratch[i+1]
+                     + scratch[i+2]*scratch[i+2]);
+    return s * PN_PER_M3F;      // Mem3DG force units -> pN
+}
+
+
 static void saveMembraneFrame(mem3dg_system* mem, const std::string& dir, int frame)
 {
     char path[512];
@@ -466,6 +491,9 @@ int main(int argc, char* argv[])
     int    remesh      = 0;           ///< 1 = adaptive remeshing (resolves tubes
                                       ///  properly instead of resisting them)
     int    remeshEvery = 50;          ///< remesh every N steps
+    int    memEvery    = 1;           ///< advance the membrane once every N
+                                      ///  Cytosim steps, by N*dt.  1 = every
+                                      ///  step (the original behaviour)
     int    anchorFollow= 0;           ///< 1 = re-project anchored single feet
                                       ///  onto the membrane every step, so they
                                       ///  track it instead of staying pinned in
@@ -491,6 +519,10 @@ int main(int argc, char* argv[])
     if ( argc > 16) maxEdge   = std::atof(argv[16]);
     if ( argc > 17) remeshEvery = std::atoi(argv[17]);
     if ( argc > 18) anchorFollow= std::atoi(argv[18]);
+    if ( argc > 19) memEvery    = std::atoi(argv[19]);
+
+    if ( memEvery < 1 )
+        memEvery = 1;
 
     // --- set up Mem3DG -------------------------------------------------------
     mem3dg_system* mem = mem3dg_system_create_from_file(
@@ -540,10 +572,23 @@ int main(int argc, char* argv[])
         double mx = maxEdge;
         if ( mx <= 0 )
         {
-            // mean edge length ~ sqrt(2*A/(sqrt(3)*nF)) for a triangulation
+            /*
+             Mean edge length of a triangulation of area A with nF faces.
+
+             An equilateral triangle of side L has area (sqrt(3)/4)L^2, so with
+             a mean face area of A/nF,
+
+                 L = sqrt( 4*A / (sqrt(3)*nF) )
+
+             This used to use 2*A instead of 4*A, which is L/sqrt(2) -- 71% of
+             the real edge length.  The intended "split anything much longer
+             than the initial mean edge" 1.5x margin was therefore only 1.06x,
+             so remeshing fired immediately on a pristine mesh.  Measured on
+             tests/icosphere.obj: true mean edge 0.1206, old auto value 0.1275.
+             */
             double A = mem3dg_system_area(mem);
             double nF = (double)mem3dg_system_num_faces(mem);
-            mx = 1.5 * std::sqrt(2.0*A/(1.7320508*nF));
+            mx = 1.5 * std::sqrt(4.0*A/(1.7320508*nF));
         }
         mem3dg_system_set_remeshing(mem, 1, remeshEvery, 0.2*mx, mx);
         std::printf("remeshing: every %d steps, maxEdge=%.4f\n", remeshEvery, mx);
@@ -611,6 +656,17 @@ int main(int argc, char* argv[])
         if ( simul.time_step() > 0 )
             dt = simul.time_step();
         std::printf("dt:        %g (adopted from simul:time_step)\n", dt);
+
+        if ( memEvery > 1 )
+        {
+            std::printf("membrane:  sub-stepped every %d Cytosim steps "
+                        "(membrane dt = %g); contacts still every step\n",
+                        memEvery, dt*memEvery);
+            if ( dt*memEvery > 5e-5 )
+                std::fprintf(stderr, "warning: membrane dt %g exceeds 5e-5, the "
+                             "largest value this project has run stably; "
+                             "check for membrane instability\n", dt*memEvery);
+        }
     }
     catch ( Exception& e ) {
         std::fprintf(stderr, "Cytosim setup failed: %s\n", e.brief().c_str());
@@ -666,10 +722,55 @@ int main(int argc, char* argv[])
          */
         long nContacts = contactForces(simul, mem, sp, work, fiberForces);
 
+        /*
+         MEMBRANE SUB-STEPPING.  `memEvery' > 1 advances the membrane once every
+         N Cytosim steps, by N*dt, instead of every step by dt.
+
+         WHY.  Profiling this run put ~90% of the wall time inside
+         mem3dg_system_step -> computeGeometricForces (halfedge traversal in
+         geometry-central), and only ~10% in Cytosim plus the contact kernel.
+         The membrane is also by far the SLOWEST variable in the system: Mem3DG
+         integrates it with a unit drag, which measured out at ~10^6 times the
+         Stokes drag on a vertex, and the filament-driven deflection over 0.15 s
+         was 0.03 nm.  Sub-cycling the slowest, most expensive variable is the
+         standard multiple-time-step arrangement, and it is unusually well
+         justified here.
+
+         The contacts are still evaluated EVERY step -- they are cheap, and they
+         are what the filaments feel -- so the wall the filaments push against is
+         never stale; only the membrane's own relaxation is coarsened.
+
+         STABILITY.  N*dt must stay under the membrane's explicit-Euler limit.
+         Every earlier run in this project stepped the membrane at 5e-5 without
+         trouble, so at dt = 5e-6 that evidence supports N up to 10.  Beyond
+         that there is no measurement behind it, so the driver warns.
+
+         memEvery = 1 reproduces the previous behaviour exactly.
+         */
+        const bool stepMembrane = ( (s % memEvery) == 0 );
+        const double memDt = dt * memEvery;
+
+        /*
+         Membrane-side total for the diagnostic, sampled HERE -- while the
+         external force buffer still holds the reaction contactForces() just
+         wrote -- and not at the bottom of the loop.
+
+         Reading it after the membrane step made it print 0 whenever that step
+         remeshed: mem3dg_system_step() calls externalForce.assign(n, 0.0) after
+         mutateMesh(), because the buffer is indexed per vertex and remeshing
+         changes the vertex count.  With memEvery=10 and remeshEvery=100 that
+         landed on every 1000th Cytosim step -- which is exactly where the
+         spurious `|F_mem| 0' lines appeared, alongside a healthy |F_fib|.
+         The forces were fine; only the measurement was taken too late.
+        */
+        double fMem = 0;
+        if ( s % 10 == 0 )
+            fMem = sumExternalForces(mem, membraneForces);
+
         // 3b. Strang: advance the membrane by half a step FIRST, so that
         //     Cytosim below sees the membrane at the middle of the interval
-        if ( strang )
-            mem3dg_system_step(mem, 0.5*dt);
+        if ( strang && stepMembrane )
+            mem3dg_system_step(mem, 0.5*memDt);
 
         // 4. filament side (fiberForces consumed by the callback)
         try {
@@ -698,18 +799,25 @@ int main(int argc, char* argv[])
         }
 
         // 5. membrane
-        if ( strang )
+        if ( stepMembrane )
         {
-            /*
-             Second half-step.  Recompute the contacts against the filaments'
-             NEW positions first -- reusing the forces from step 2 would break
-             the time-reversal symmetry that buys the extra order.
-             */
-            nContacts = contactForces(simul, mem, sp, work, fiberForces);
-            mem3dg_system_step(mem, 0.5*dt);
+            if ( strang )
+            {
+                /*
+                 Second half-step.  Recompute the contacts against the filaments'
+                 NEW positions first -- reusing the forces from step 2 would break
+                 the time-reversal symmetry that buys the extra order.
+                 */
+                nContacts = contactForces(simul, mem, sp, work, fiberForces);
+                // the second contact set is the one that drives this half-step,
+                // so it is the one worth reporting
+                if ( s % 10 == 0 )
+                    fMem = sumExternalForces(mem, membraneForces);
+                mem3dg_system_step(mem, 0.5*memDt);
+            }
+            else
+                mem3dg_system_step(mem, memDt);
         }
-        else
-            mem3dg_system_step(mem, dt);
 
         /*
          MEMBRANE-FOLLOWING ANCHORS.
@@ -766,30 +874,13 @@ int main(int argc, char* argv[])
 
         if ( s % 10 == 0 )
         {
-            // net magnitudes, to confirm force actually crosses the boundary
-            double fFib = 0, fMem = 0;
+            // net magnitudes, to confirm force actually crosses the boundary.
+            // fMem was sampled earlier in the step, before the membrane could
+            // clear the buffer by remeshing; both are in pN, so |F_fib| ==
+            // |F_mem| is a genuine action-reaction check.
+            double fFib = 0;
             for ( size_t i = 0; i < fiberForces.size(); ++i )
                 fFib += fiberForces[i].force.norm();
-
-            /*
-             Re-query the vertex count: remeshing changes it, and this buffer
-             was sized at startup.  Reading into a stale buffer would overflow.
-             */
-            const size_t nv = mem3dg_system_num_vertices(mem);
-            if ( membraneForces.size() != nv*3 )
-                membraneForces.assign(nv*3, 0.0);
-            mem3dg_system_get_external_forces(mem, &membraneForces[0]);
-            for ( size_t i = 0; i + 2 < membraneForces.size(); i += 3 )
-                fMem += std::sqrt(membraneForces[i]*membraneForces[i]
-                                + membraneForces[i+1]*membraneForces[i+1]
-                                + membraneForces[i+2]*membraneForces[i+2]);
-            /*
-             The buffer holds Mem3DG force units; report it in pN so that the
-             two columns are the SAME physical quantity and |F_fib| == |F_mem|
-             remains a real action-reaction check.  Without this the fix above
-             would show a spurious 1000x mismatch.
-             */
-            fMem *= PN_PER_M3F;
 
             std::printf("step %4d  contacts %5ld  |F_fib| %.4g pN  |F_mem| %.4g pN  t_mem %.6g\n",
                         s, nContacts, fFib, fMem, mem3dg_system_time(mem));

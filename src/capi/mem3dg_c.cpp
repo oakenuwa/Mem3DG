@@ -691,86 +691,55 @@ long mem3dg_system_filament_confinement(mem3dg_system *h, const double *points,
   if (mesh.hasBoundary())
     return -1;
 
-  const std::size_t nF = mesh.nFaces();
-
   if (out_f)
     std::fill(out_f, out_f + 3 * nPts, 0.0);
 
   long nForced = 0;
 
+  /*
+   ACCELERATION.  This used to scan every face for every filament point, and
+   then ray-cast to decide the side -- two O(nPts * nFaces) sweeps per call.
+   With a remeshing membrane nFaces grows as the run proceeds, so the contact
+   kernel came to dominate the whole simulation.
+
+   closestOnSurface() already does this properly and is what mem3dg_system_inside
+   and _project were switched to: it takes the K nearest VERTICES from the KD
+   tree and tests only their incident faces, with a stamp so each face is tested
+   once and a robustness pass for the case where the closest face touches none of
+   the K nearest vertices.
+
+   The side test comes free with it.  The returned pseudonormal is outward, so
+   (q - hit.point) . normal IS the signed distance -- exactly what
+   mem3dg_system_inside uses, and it removes the ray cast entirely.
+
+   This is a pure acceleration: the quantities fed to the force below --
+   signed distance, outward axis, contact face and its barycentric weights --
+   are the same ones the brute-force version computed.
+   */
   for (std::size_t i = 0; i < nPts; ++i) {
     const Eigen::Vector3d q(points[3 * i + 0], points[3 * i + 1],
                             points[3 * i + 2]);
 
-    // ---- closest point on the surface -------------------------------------
-    double bestAbs = std::numeric_limits<double>::infinity();
-    coupled::EdgeFaceContact bestCt;
-    gcs::Face bestFace;
-    bool found = false;
-
-    for (std::size_t fi = 0; fi < nF; ++fi) {
-      gcs::Face face = mesh.face(fi);
-      gcs::Halfedge he = face.halfedge();
-      const gc::Vector3 A = vpg.inputVertexPositions[he.vertex()];
-      const gc::Vector3 B = vpg.inputVertexPositions[he.next().vertex()];
-      const gc::Vector3 C = vpg.inputVertexPositions[he.next().next().vertex()];
-      const std::array<Eigen::Vector3d, 3> fv = {
-          Eigen::Vector3d(A.x, A.y, A.z), Eigen::Vector3d(B.x, B.y, B.z),
-          Eigen::Vector3d(C.x, C.y, C.z)};
-
-      // prune: this face cannot beat the best found so far
-      const Eigen::Vector3d ctr = (fv[0] + fv[1] + fv[2]) / 3.0;
-      const double faceRad =
-          std::max({(fv[0] - ctr).norm(), (fv[1] - ctr).norm(),
-                    (fv[2] - ctr).norm()});
-      if ((ctr - q).norm() - faceRad > bestAbs)
-        continue;
-
-      // degenerate "segment" == the point itself
-      const coupled::EdgeFaceContact ct =
-          coupled::minimumEdgeFaceContact(q, q, fv);
-      if (ct.distance < bestAbs) {
-        bestAbs = ct.distance;
-        bestCt = ct;
-        bestFace = face;
-        found = true;
-      }
-    }
-    if (!found)
+    const SurfaceHit hit = closestOnSurface(impl, q);
+    if (!hit.valid)
       continue;
 
-    // ---- which side, by ray casting ---------------------------------------
-    const bool isOutside = !pointInside(mesh, vpg, q);
-
     /*
-     Outward axis taken from the closest-point pair rather than a face normal:
-     (q - pFace) points from the surface toward the query point, so flipping it
-     by the side test gives a consistently outward direction.
+     Signed distance, positive OUTSIDE.  The old code built the outward axis by
+     normalising (q - pFace) and flipping it by the ray-cast side; for a closest
+     point that vector is parallel to the surface normal there, so the flipped
+     version and the pseudonormal agree -- and the pseudonormal additionally
+     stays well defined when q lies exactly ON the surface, which the old code
+     needed a special branch for.
      */
-    Eigen::Vector3d sep = q - bestCt.pFace;
-    double sepLen = sep.norm();
-    Eigen::Vector3d nOut;
-    if (sepLen > 1e-12) {
-      nOut = (isOutside ? 1.0 : -1.0) * (sep / sepLen);
-    } else {
-      // exactly on the surface: the pair degenerates, use the face normal
-      const gc::Vector3 gn = vpg.faceNormals[bestFace];
-      nOut = Eigen::Vector3d(gn.x, gn.y, gn.z);
-      const double nn = nOut.norm();
-      if (nn < 1e-30)
-        continue;
-      nOut /= nn;
-      sepLen = 0.0;
-    }
-
-    const double sd = (isOutside ? 1.0 : -1.0) * sepLen; // + outside
-    const double pen = sd + shell;                       // wall at sd = -shell
+    const double sd = (q - hit.point).dot(hit.normal);
+    const double pen = sd + shell;   // wall sits at sd = -shell
     if (pen <= 0.0)
-      continue;                                          // deep inside
+      continue;                      // deep inside, no contact
 
     ++nForced;
 
-    const Eigen::Vector3d Fin = (-stiffness * pen) * nOut; // inward
+    const Eigen::Vector3d Fin = (-stiffness * pen) * hit.normal; // inward
 
     if (out_f)
       for (int k = 0; k < 3; ++k)
@@ -778,11 +747,11 @@ long mem3dg_system_filament_confinement(mem3dg_system *h, const double *points,
 
     // membrane: equal and opposite, spread by barycentric weights
     if (add_to_membrane) {
-      gcs::Halfedge hv = bestFace.halfedge();
+      gcs::Halfedge hv = hit.face.halfedge();
       for (int k = 0; k < 3; ++k) {
         const std::size_t vi = hv.vertex().getIndex();
         for (int j = 0; j < 3; ++j)
-          impl->externalForce[3 * vi + j] -= bestCt.wFace[k] * Fin[j];
+          impl->externalForce[3 * vi + j] -= hit.w[k] * Fin[j];
         hv = hv.next();
       }
     }
