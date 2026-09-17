@@ -27,14 +27,6 @@
  minimum distance -- including the piercing case -- and decomposes a harmonic
  repulsion with DDG barycentric weights, so Newton's third law holds exactly.
 
- An earlier version computed contacts here instead, comparing each filament
- POINT to each membrane VERTEX.  That is blind to a filament crossing the
- middle of a triangle away from its corners, which is exactly how filaments
- tunnel through a membrane.
-
- Cost is still O(nSegments * nFaces) per call, with a centroid quick-reject
- inside Mem3DG.  A BVH or spatial grid is the next optimisation if filament
- counts grow.
  =============================================================================
 */
 
@@ -128,29 +120,6 @@ struct ContactWork {
 
 /**
  Compute filament-membrane steric forces for the current configuration.
-
- The contact geometry is evaluated INSIDE Mem3DG, via
- mem3dg_system_filament_repulsion().  That kernel measures the true minimum
- distance between each filament segment and each membrane triangle -- including
- the case where a segment pierces a triangle, which is precisely how filaments
- tunnel through a membrane.  It then decomposes the force with DDG barycentric
- weights, so Newton's third law holds exactly.
-
- This replaces an earlier vertex-to-vertex loop written here in the driver,
- which compared each filament POINT against each membrane VERTEX.  That test
- sees nothing when a filament crosses the middle of a triangle without coming
- near any of its three corners, so filaments could pass straight through; it
- also treated the membrane as a cloud of points rather than a surface.
-
- Membrane side: accumulated into Mem3DG's external force buffer by the call
- itself (add_to_membrane=1), after we clear it, so it holds exactly this
- contribution and is applied on the next mem3dg_system_step().
-
- Filament side: returned per segment ENDPOINT and folded back onto fiber points
- here.  A fiber of N points has N-1 segments, and point k is shared by segment
- k-1 (as its p1) and segment k (as its p0), so both contributions are summed.
-
- Returns the number of contacting (segment, face) pairs.
  */
 static long contactForces(Simul const&             simul,
                           mem3dg_system*           mem,
@@ -191,12 +160,7 @@ static long contactForces(Simul const&             simul,
     if ( p.mode == 1 )
     {
         /*
-         Confinement works per POINT, not per segment.  Passing each filament
-         vertex exactly once means every one carries its own full wall force.
-         The earlier segment form had to halve each endpoint (consecutive
-         segments share interior points), which left each fiber's two TERMINAL
-         points at half strength -- and those are precisely the points that lead
-         growth into the membrane, so they were the ones that leaked out.
+         Confinement works per POINT.
          */
         w.ptP.clear(); w.ptRef.clear();
         for ( Fiber const* F = simul.fibers.first(); F; F = F->next() )
@@ -215,8 +179,6 @@ static long contactForces(Simul const&             simul,
             return 0;
         w.ptF.assign(nPts*3, 0.0);
 
-        // stiffness converted pN/um -> Mem3DG force/um, so the reaction this
-        // accumulates into the membrane buffer is in the membrane's own units
         long n = mem3dg_system_filament_confinement(
             mem, &w.ptP[0], nPts, /*shell=*/p.cutoff, p.stiff / PN_PER_M3F,
             &w.ptF[0], /*add_to_membrane=*/1);
@@ -230,7 +192,6 @@ static long contactForces(Simul const&             simul,
 
         for ( size_t i = 0; i < nPts; ++i )
         {
-            // ...and converted back to pN on the way into Cytosim
             const Vector f(w.ptF[3*i+0] * PN_PER_M3F,
                            w.ptF[3*i+1] * PN_PER_M3F,
                            w.ptF[3*i+2] * PN_PER_M3F);
@@ -248,13 +209,6 @@ static long contactForces(Simul const&             simul,
 
     /*
      Same pN/um -> Mem3DG conversion as the confinement branch above.
-
-     NOTE this branch does NOT fold segF0/segF1 back onto the fiber points, so
-     mode 0 currently applies force to the MEMBRANE only -- `fiberForces' is
-     left empty and Cytosim feels nothing.  The block comment on this function
-     describes the folding that mode 1 does; it was never written for mode 0.
-     Left as-is rather than changed here, because this commit is about units and
-     wiring it up would alter what every existing mode-0 test does.
      */
     long nContacts = mem3dg_system_filament_repulsion(
         mem, &w.segP0[0], &w.segP1[0], nSeg,
@@ -323,15 +277,6 @@ static void saveMembraneFrame(mem3dg_system* mem, const std::string& dir, int fr
 /**
  Write one filament frame as polylines, in the SAME format and directory as the
  membrane frames:  <dir>/fibers_0000.txt, ...
-
- Why here rather than via the `export_fibers` tool: this driver parses the
- config with Run=0, Write=0, so Cytosim never writes objects.cmo -- there is no
- trajectory for export_fibers to read.  Exporting from inside the coupled loop
- also makes synchronisation exact: fibers_000K.txt and membrane_000K.obj are
- written at the same instant of the same run, by construction.
-
- (export_fibers remains the right tool for a standalone Cytosim trajectory; the
- file format written here is identical, so the Blender importer handles both.)
  */
 static void saveFiberFrame(Simul const& simul, const std::string& dir, int frame)
 {
@@ -375,20 +320,6 @@ static void saveFiberFrame(Simul const& simul, const std::string& dir, int frame
  Write one singles/couples frame as point clouds, alongside the membrane and
  fiber frames:  <dir>/points_0000.txt, ...
 
- Points are grouped into CLASSES -- one block per (kind, property name, binding
- state) -- rather than written one per line with attributes.  Two reasons:
-
-  - Blender renders a class as a single vertex-instanced mesh.  One object per
-    class costs one draw call; one object per single would cost hundreds per
-    frame and make scrubbing unusable.
-  - binding state is what you actually want to see (does the couple bridge two
-    filaments, or is it just diffusing?), and having it in the block header lets
-    the importer give each state its own material without per-vertex attributes.
-
- The state comes for free from Cytosim's own list structure: SingleSet keeps
- free/attached in separate lists, CoupleSet keeps all four combinations, so no
- per-object queries are needed.
-
  A couple's position() is its centre: the diffusing position while free, and the
  midpoint of the two hands once it bridges.
  */
@@ -409,21 +340,6 @@ static void savePointFrame(Simul const& simul, const std::string& dir, int frame
     // order stable from frame to frame, so Blender materials stay put
     std::map<std::string, std::vector<Vector> > classes;
 
-    /*
-     A single has TWO meaningful positions once it is attached, and exporting
-     only one hides the thing you usually want to see:
-
-       posFoot() -- the anchor.  For a `fixed' single (Picket) this is the point
-                    it was created at, e.g. on the membrane.
-       posHand() -- where its hand grips the filament.
-
-     While free the two coincide, so one point is enough and it is emitted as
-     `free'.  Once attached they separate by the link stretch, and BOTH are
-     emitted -- as `anchor' and `hand' -- so the viewer shows the anchor on the
-     membrane and the grip on the filament as two distinct clouds.  With
-     single:stiffness = 0 the separation is unbounded, which is exactly the
-     failure this export makes visible.
-    */
     for ( Single const* S = simul.singles.firstF(); S; S = S->next() )
         classes[std::string("single ") + S->prop->name() + " free"]
             .push_back(S->position());
@@ -533,36 +449,13 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    /*
-     Material properties.  Without these the membrane has ONLY bending, which is
-     a purely local resistance: a filament dents one spot and the rest of the
-     surface never learns about it.
-
-     `areaFrac` < 1 sets the preferred area BELOW the initial area, so the
-     membrane starts under tension.  That matters more than the modulus itself:
-     tension = Ksg*(A-At)/At is a global scalar, and a local dent changes total
-     area by ~0.01%, so with At == A0 the tension stays ~0 and nothing pulls
-     back.  Pre-tensed, the surface is taut everywhere and responds at once.
-     */
     if ( Ksg > 0 )
         mem3dg_system_set_tension(mem, Ksg, areaFrac * mem3dg_system_area(mem));
     if ( Kv > 0 )
         mem3dg_system_set_osmotic(mem, Kv, -1.0);   // defend the initial volume
-    /*
-     Edge springs.  Tension only sees TOTAL area, so the mesh can dump all its
-     stretch into a few edges for free -- which is precisely how a filament
-     turns into a needle instead of a bulge.  Kse penalises each edge on its
-     own, forcing the deformation to be shared with the neighbours.
-     */
     if ( Kse > 0 )
         mem3dg_system_set_regularization(mem, Kse, 0.0, 0.0);
 
-    /*
-     Adaptive remeshing.  Where Kse RESISTS the stretch that a growing tube
-     causes, remeshing RESOLVES it: edges longer than maxEdge are split, so the
-     tube gains vertices as it extends.  The two are alternatives -- Kse
-     measures each edge against a reference mesh that remeshing invalidates.
-     */
     if ( remesh )
     {
         if ( Kse > 0 )
@@ -572,20 +465,7 @@ int main(int argc, char* argv[])
         double mx = maxEdge;
         if ( mx <= 0 )
         {
-            /*
-             Mean edge length of a triangulation of area A with nF faces.
 
-             An equilateral triangle of side L has area (sqrt(3)/4)L^2, so with
-             a mean face area of A/nF,
-
-                 L = sqrt( 4*A / (sqrt(3)*nF) )
-
-             This used to use 2*A instead of 4*A, which is L/sqrt(2) -- 71% of
-             the real edge length.  The intended "split anything much longer
-             than the initial mean edge" 1.5x margin was therefore only 1.06x,
-             so remeshing fired immediately on a pristine mesh.  Measured on
-             tests/icosphere.obj: true mean edge 0.1206, old auto value 0.1275.
-             */
             double A = mem3dg_system_area(mem);
             double nF = (double)mem3dg_system_num_faces(mem);
             mx = 1.5 * std::sqrt(4.0*A/(1.7320508*nF));
@@ -615,7 +495,6 @@ int main(int argc, char* argv[])
     std::vector<FiberForce> fiberForces;
     ContactWork work;   // reusable scratch for the segment arrays
 
-    // where the PLY sequence lands; created if absent (POSIX mkdir, ignore EEXIST)
     if ( saveEvery > 0 )
     {
         std::string cmd = "mkdir -p '" + frameDir + "'";
@@ -625,34 +504,14 @@ int main(int argc, char* argv[])
     int frameIndex = 0;
 
     // --- set up Cytosim ------------------------------------------------------
-    /*
-     Hand the membrane to any `shape = mem3dg' Space BEFORE the config is
-     parsed: `new couple ... { position = surface }' is resolved during
-     parsing, so the Space must already be able to answer project()/inside().
-
-     SpaceMem3DG borrows this handle; the driver keeps ownership.  That way the
-     membrane the filaments push on and the one objects are confined by are the
-     same object.
-     */
     SpaceMem3DG::setHandle(mem);
 
     Simul simul;
     try {
         simul.initCytosim();
-        // Run=0, Write=0: build the objects declared in the config, but do NOT
-        // execute its `run` commands -- this program owns the time loop.
         Parser(&simul, 1, 1, 1, 0, 0).readConfig(config);
         simul.prepare();
 
-        /*
-         Adopt Cytosim's configured time_step for the membrane too.
-
-         There are two clocks here -- Cytosim's `simul:time_step' and the dt we
-         pass to mem3dg_system_step().  If they differ the two halves of the
-         split advance by different amounts and the coupling is silently
-         inconsistent.  Taking Cytosim's value makes `time_step' in the .cym the
-         single knob, so the two can never drift apart.
-         */
         if ( simul.time_step() > 0 )
             dt = simul.time_step();
         std::printf("dt:        %g (adopted from simul:time_step)\n", dt);
@@ -674,12 +533,6 @@ int main(int argc, char* argv[])
         return 2;
     }
 
-    /*
-     Injected inside Simul::solve_meca(), after Cytosim has registered all of
-     its own interactions and before Meca::solve().  Adding here means the
-     membrane reaction forces take part in the same implicit solve as
-     everything else, rather than being applied as a separate explicit kick.
-     */
     simul.externalForceCallback = [&fiberForces](Meca& meca) {
         for ( size_t i = 0; i < fiberForces.size(); ++i )
             meca.addForce(fiberForces[i].mecable,
@@ -687,82 +540,14 @@ int main(int argc, char* argv[])
                           fiberForces[i].force);
     };
 
-    /*
-     --- coupled loop ---------------------------------------------------------
-
-     Two splitting schemes are available.
-
-     LIE-TROTTER (strang = 0), error ~ dt:
-         contacts -> Cytosim(dt) -> Mem3DG(dt)
-     The two sub-systems simply alternate.  Each one advances a full step using
-     the other's position from the START of the step, so the information it acts
-     on is one step stale, and that staleness accumulates linearly.
-
-     STRANG (strang = 1), error ~ dt^2:
-         contacts -> Mem3DG(dt/2) -> Cytosim(dt) -> recompute contacts -> Mem3DG(dt/2)
-     The membrane is advanced half a step, Cytosim takes its full step against
-     that half-advanced (i.e. mid-interval) membrane, and the membrane then
-     completes its second half.  The scheme is symmetric under time reversal,
-     which cancels the leading error term and leaves O(dt^2).
-
-     The extra cost is one additional contact evaluation per step, NOT a second
-     Cytosim solve -- Cytosim is still stepped exactly once.  The contacts must
-     genuinely be recomputed between the half-steps: reusing the first set
-     destroys the symmetry and silently degrades the scheme back to first order.
-     */
     for ( int s = 0; s < (int)nSteps; ++s )
     {
-        /*
-         1+2+3. Contacts on the frozen configuration.
-
-         One call now covers what used to be three steps: it reads the current
-         membrane geometry itself, computes the contacts, writes the membrane
-         reaction straight into Mem3DG's external force buffer, and hands back
-         the filament-side forces.  No vertex positions cross the ABI.
-         */
+        
         long nContacts = contactForces(simul, mem, sp, work, fiberForces);
 
-        /*
-         MEMBRANE SUB-STEPPING.  `memEvery' > 1 advances the membrane once every
-         N Cytosim steps, by N*dt, instead of every step by dt.
-
-         WHY.  Profiling this run put ~90% of the wall time inside
-         mem3dg_system_step -> computeGeometricForces (halfedge traversal in
-         geometry-central), and only ~10% in Cytosim plus the contact kernel.
-         The membrane is also by far the SLOWEST variable in the system: Mem3DG
-         integrates it with a unit drag, which measured out at ~10^6 times the
-         Stokes drag on a vertex, and the filament-driven deflection over 0.15 s
-         was 0.03 nm.  Sub-cycling the slowest, most expensive variable is the
-         standard multiple-time-step arrangement, and it is unusually well
-         justified here.
-
-         The contacts are still evaluated EVERY step -- they are cheap, and they
-         are what the filaments feel -- so the wall the filaments push against is
-         never stale; only the membrane's own relaxation is coarsened.
-
-         STABILITY.  N*dt must stay under the membrane's explicit-Euler limit.
-         Every earlier run in this project stepped the membrane at 5e-5 without
-         trouble, so at dt = 5e-6 that evidence supports N up to 10.  Beyond
-         that there is no measurement behind it, so the driver warns.
-
-         memEvery = 1 reproduces the previous behaviour exactly.
-         */
         const bool stepMembrane = ( (s % memEvery) == 0 );
         const double memDt = dt * memEvery;
 
-        /*
-         Membrane-side total for the diagnostic, sampled HERE -- while the
-         external force buffer still holds the reaction contactForces() just
-         wrote -- and not at the bottom of the loop.
-
-         Reading it after the membrane step made it print 0 whenever that step
-         remeshed: mem3dg_system_step() calls externalForce.assign(n, 0.0) after
-         mutateMesh(), because the buffer is indexed per vertex and remeshing
-         changes the vertex count.  With memEvery=10 and remeshEvery=100 that
-         landed on every 1000th Cytosim step -- which is exactly where the
-         spurious `|F_mem| 0' lines appeared, alongside a healthy |F_fib|.
-         The forces were fine; only the measurement was taken too late.
-        */
         double fMem = 0;
         if ( s % 10 == 0 )
             fMem = sumExternalForces(mem, membraneForces);
@@ -774,22 +559,6 @@ int main(int argc, char* argv[])
 
         // 4. filament side (fiberForces consumed by the callback)
         try {
-            /*
-             Both calls are required, in this order.  Cytosim's own run loop
-             does exactly this (Interface::step_simul):
-
-                 (sim_->*FUNC)();   // e.g. solve_meca()
-                 sim_->steps();
-
-             solve_meca() is what assembles the interactions, fires
-             externalForceCallback, solves, and applies the result -- i.e. it is
-             the mechanics.  steps() only performs the stochastic/object updates
-             (binding, polymerisation, object bookkeeping).
-
-             Calling steps() alone -- as this driver originally did -- leaves the
-             mechanics unsolved: the callback never fires and the filaments never
-             move under any force.
-             */
             simul.solve_meca();
             simul.steps();
         }
@@ -803,14 +572,7 @@ int main(int argc, char* argv[])
         {
             if ( strang )
             {
-                /*
-                 Second half-step.  Recompute the contacts against the filaments'
-                 NEW positions first -- reusing the forces from step 2 would break
-                 the time-reversal symmetry that buys the extra order.
-                 */
                 nContacts = contactForces(simul, mem, sp, work, fiberForces);
-                // the second contact set is the one that drives this half-step,
-                // so it is the one worth reporting
                 if ( s % 10 == 0 )
                     fMem = sumExternalForces(mem, membraneForces);
                 mem3dg_system_step(mem, 0.5*memDt);
@@ -819,27 +581,6 @@ int main(int argc, char* argv[])
                 mem3dg_system_step(mem, memDt);
         }
 
-        /*
-         MEMBRANE-FOLLOWING ANCHORS.
-
-         Cytosim's Anchor and Picket pin their foot in the LAB frame: sPos is set
-         once at placement and never moves.  That is wrong for a membrane-bound
-         nucleator -- as the membrane deforms it slides out from under the foot,
-         the elastic link stretches, and the filament ends up held at a point
-         that is no longer on the surface.
-
-         Re-projecting each foot onto the current surface makes it track the
-         membrane instead, which is what a formin or an Arp2/3 complex actually
-         does.  It also changes the mechanics qualitatively: with the feet pinned
-         in the lab frame the membrane load is set by the PLACEMENT and nothing
-         the filaments do to each other can move it, whereas a foot that lives on
-         the surface can be repositioned as its filament is pushed around.
-
-         Done AFTER the membrane has advanced, so the feet land on the new
-         surface, and before the next iteration reads positions to build forces.
-         Applies to both the free and attached lists: Anchor::position() returns
-         the foot either way, and Anchor::setPosition() writes sPos directly.
-        */
         if ( anchorFollow )
         {
             for ( int pass = 0; pass < 2; ++pass )
@@ -847,12 +588,6 @@ int main(int argc, char* argv[])
                 Single * sgl = pass ? simul.singles.firstA() : simul.singles.firstF();
                 for ( ; sgl; sgl = sgl->next() )
                 {
-                    /*
-                     Only feet that are actually anchored somewhere.  A plain
-                     diffusing Single has no foot -- its position() IS its hand
-                     on the fiber -- so projecting it would drag the filament
-                     rather than the anchor.
-                     */
                     if ( ! sgl->hasLink() )
                         continue;
                     Vector p = sgl->position();
@@ -874,10 +609,6 @@ int main(int argc, char* argv[])
 
         if ( s % 10 == 0 )
         {
-            // net magnitudes, to confirm force actually crosses the boundary.
-            // fMem was sampled earlier in the step, before the membrane could
-            // clear the buffer by remeshing; both are in pN, so |F_fib| ==
-            // |F_mem| is a genuine action-reaction check.
             double fFib = 0;
             for ( size_t i = 0; i < fiberForces.size(); ++i )
                 fFib += fiberForces[i].force.norm();
@@ -895,12 +626,7 @@ int main(int argc, char* argv[])
         savePointFrame(simul, frameDir, frameIndex);
         ++frameIndex;
     }
-    /*
-     No separate "final" file: the block above already captures the last state
-     as the last frame of the sequence.  (An earlier version wrote
-     membrane_final.ply here, which always produced a 0-byte file -- see the
-     note on save_ply in saveMembraneFrame.)
-     */
+
     mem3dg_system_destroy(mem);
     std::printf("done: wrote %d membrane frame(s) to %s/\n",
                 saveEvery > 0 ? frameIndex : 0, frameDir.c_str());

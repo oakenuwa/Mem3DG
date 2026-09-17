@@ -54,28 +54,18 @@ struct Impl {
   long stepCount = 0;
 
   /*
-   Spatial index over the vertex positions.  Both the closest-point query and
-   the inside/outside test used to scan every face, which is O(nFaces) per
-   query -- and remeshing pushes nFaces up as the simulation runs.  A KD-tree
-   over the vertices lets us look at only the faces incident to the few nearest
-   vertices instead.
-
-   Invalidated by anything that moves or adds vertices, so it is rebuilt lazily:
-   `knnStale` is set by step(), set_vertex_positions() and remeshing.
+ A KD-tree over the vertices lets us look at only the faces incident to the few nearest vertices instead.
    */
   std::unique_ptr<gc::NearestNeighborFinder> knn;
   std::vector<gc::Vector3> knnPoints;
   bool knnStale = true;
-  // per-query "already tested" marks for faces, stamped by a generation counter
-  // so they never need clearing between queries
+
   std::vector<unsigned> faceStamp;
   unsigned stampGen = 0;
 
   std::size_t nV() const { return system->geometry.mesh->nVertices(); }
 };
 
-// Build a Parameters with a minimal harmonic bending model and everything else
-// inert, so a bare membrane just relaxes / responds to injected forces.
 ms::Parameters makeParams(double Kb, double Kbc, double H0c) {
   ms::Parameters p;
   p.variation.isShapeVariation = true;
@@ -210,7 +200,6 @@ void mem3dg_system_set_vertex_positions(mem3dg_system *h, const double *xyz) {
   for (std::size_t i = 0; i < nV; ++i)
     vpg.inputVertexPositions[mesh.vertex(i)] =
         gc::Vector3{xyz[3 * i + 0], xyz[3 * i + 1], xyz[3 * i + 2]};
-  // refresh cached areas/volumes/normals so the next force call sees the change
   impl->system->updateConfigurations();
   impl->knnStale = true;
 }
@@ -237,7 +226,7 @@ void mem3dg_system_set_tension(mem3dg_system *h, double Ksg,
     impl->system->parameters.tension.form = NULL;
     return;
   }
-  // default to the area the membrane currently has, so it defends its own shape
+
   const double At =
       (preferred_area > 0.0) ? preferred_area : impl->system->geometry.surfaceArea;
   impl->system->parameters.tension.form = [Ksg, At](double area) {
@@ -298,24 +287,6 @@ void mem3dg_system_set_remeshing(mem3dg_system *h, int enable, int period,
     return;
   }
 
-  /*
-   splitLarge is what actually resolves a growing tube.  Note that splitLong,
-   despite the name, does NOT use maximumEdgeLength: its test is RELATIVE,
-
-       edgeLength(e) > edgeLength(next) + edgeLength(twin.next)
-
-   so an edge must exceed the sum of two neighbours before it splits -- roughly
-   a doubling relative to the local mesh, which a smoothly stretching tube never
-   reaches.  maximumEdgeLength only guards against COLLAPSING long edges.
-
-   splitLarge is the absolute criterion:
-
-       faceArea(he) + faceArea(twin) > 4 * maximumFaceArea
-
-   Two equilateral triangles of side L sum to 2*(sqrt(3)/4)L^2 = 0.866 L^2, so
-   setting maximumFaceArea = 0.2165 * max_edge^2 puts the threshold exactly at
-   edges of length max_edge.
-   */
   mut.splitLarge = true;
   mut.splitCurved = true;          // also refine where the surface bends sharply
   mut.splitSkinnyDelaunay = true;
@@ -376,7 +347,6 @@ namespace {
 
 /**
  Count how many times a ray from `q` along `dir` crosses the surface.
- Moller-Trumbore per triangle. 
  */
 int rayCrossings(gcs::ManifoldSurfaceMesh &mesh,
                  gcs::VertexPositionGeometry &vpg, const Eigen::Vector3d &q,
@@ -415,7 +385,6 @@ int rayCrossings(gcs::ManifoldSurfaceMesh &mesh,
     if (t <= EPS)
       continue; // behind the origin
 
-    // a hit within EDGE_TOL of the boundary may be counted 0 or 2 times
     if (u < EDGE_TOL || v < EDGE_TOL || u + v > 1.0 - EDGE_TOL)
       grazing = true;
 
@@ -424,7 +393,6 @@ int rayCrossings(gcs::ManifoldSurfaceMesh &mesh,
   return hits;
 }
 
-/// robust inside test: retry with other directions if a cast grazes an edge
 bool pointInside(gcs::ManifoldSurfaceMesh &mesh,
                  gcs::VertexPositionGeometry &vpg, const Eigen::Vector3d &q) {
   
@@ -473,17 +441,6 @@ struct SurfaceHit {
   bool            valid = false;
 };
 
-/**
- Closest point on the surface to `q`, accelerated by the vertex KD-tree.
-
- Instead of scanning every face, take the K nearest VERTICES and test only the
- faces incident to them.  For a well-shaped mesh the closest face touches one of
- the closest few vertices, so K=8 is ample; the brute-force path is kept in the
- tests.
-
- The returned normal is the ANGLE-WEIGHTED PSEUDONORMAL, not the raw face
- normal.
- */
 SurfaceHit closestOnSurface(Impl *impl, const Eigen::Vector3d &q,
                             std::size_t K = 8) {
   refreshKnn(impl);
@@ -537,19 +494,6 @@ SurfaceHit closestOnSurface(Impl *impl, const Eigen::Vector3d &q,
     for (gcs::Face f : mesh.vertex(vi).adjacentFaces())
       testFace(f);
 
-  /*
-   Robustness pass, run ONLY when it can matter.  The closest face need not
-   touch one of the k closest VERTICES -- a long thin triangle can be nearer
-   than any of its corners -- and on a remeshed membrane this missed the true
-   closest face on ~0.1% of queries.
-
-   A face can only beat the current best if one of its vertices lies within
-   (bestDistance + that face's longest edge) of the query.  Rather than track
-   edge lengths, expand over the 1-ring of the vertices already visited, but
-   only when the nearest vertex is further away than the best surface distance
-   -- i.e. when the closest point is plausibly on a face whose corners are all
-   comparatively distant.  On well-shaped meshes this almost never triggers.
-   */
   if (best.valid && !near.empty()) {
     const gc::Vector3 nv = impl->knnPoints[near.front()];
     const double dNearestVert =
@@ -565,14 +509,6 @@ SurfaceHit closestOnSurface(Impl *impl, const Eigen::Vector3d &q,
   if (!best.valid)
     return best;
 
-  /*
-   Angle-weighted pseudonormal at the closest point.  The barycentric weights
-   tell us where it landed: interior of the face (all three weights positive),
-   on an edge (one weight ~0), or at a vertex (two weights ~0).  Averaging the
-   incident face normals with the appropriate weights covers all three cases in
-   one expression: contributions come from the faces around whichever vertices
-   carry weight, scaled by their corner angle.
-   */
   const double TOL = 1e-9;
   Eigen::Vector3d n = Eigen::Vector3d::Zero();
   gcs::Halfedge hv = best.face.halfedge();
@@ -628,12 +564,6 @@ int mem3dg_system_inside(const mem3dg_system *h, double x, double y, double z) {
   if (!hit.valid)
     return -1;
 
-  /*
-   Sign of the projection onto the ANGLE-WEIGHTED PSEUDONORMAL at the closest
-   point.  This is exact for a closed manifold and costs nothing beyond the
-   closest-point query we already did -- unlike ray casting, which needed a
-   separate O(nFaces) sweep (and retries when a ray grazed an edge).
-   */
   const double sd = (q - hit.point).dot(hit.normal);
   return (sd < 0.0) ? 1 : 0;
 }
@@ -696,26 +626,6 @@ long mem3dg_system_filament_confinement(mem3dg_system *h, const double *points,
 
   long nForced = 0;
 
-  /*
-   ACCELERATION.  This used to scan every face for every filament point, and
-   then ray-cast to decide the side -- two O(nPts * nFaces) sweeps per call.
-   With a remeshing membrane nFaces grows as the run proceeds, so the contact
-   kernel came to dominate the whole simulation.
-
-   closestOnSurface() already does this properly and is what mem3dg_system_inside
-   and _project were switched to: it takes the K nearest VERTICES from the KD
-   tree and tests only their incident faces, with a stamp so each face is tested
-   once and a robustness pass for the case where the closest face touches none of
-   the K nearest vertices.
-
-   The side test comes free with it.  The returned pseudonormal is outward, so
-   (q - hit.point) . normal IS the signed distance -- exactly what
-   mem3dg_system_inside uses, and it removes the ray cast entirely.
-
-   This is a pure acceleration: the quantities fed to the force below --
-   signed distance, outward axis, contact face and its barycentric weights --
-   are the same ones the brute-force version computed.
-   */
   for (std::size_t i = 0; i < nPts; ++i) {
     const Eigen::Vector3d q(points[3 * i + 0], points[3 * i + 1],
                             points[3 * i + 2]);
@@ -724,14 +634,6 @@ long mem3dg_system_filament_confinement(mem3dg_system *h, const double *points,
     if (!hit.valid)
       continue;
 
-    /*
-     Signed distance, positive OUTSIDE.  The old code built the outward axis by
-     normalising (q - pFace) and flipping it by the ray-cast side; for a closest
-     point that vector is parallel to the surface normal there, so the flipped
-     version and the pseudonormal agree -- and the pseudonormal additionally
-     stays well defined when q lies exactly ON the surface, which the old code
-     needed a special branch for.
-     */
     const double sd = (q - hit.point).dot(hit.normal);
     const double pen = sd + shell;   // wall sits at sd = -shell
     if (pen <= 0.0)
@@ -788,8 +690,6 @@ long mem3dg_system_filament_repulsion(mem3dg_system *h, const double *seg_p0,
     const Eigen::Vector3d p1(seg_p1[3 * s + 0], seg_p1[3 * s + 1],
                              seg_p1[3 * s + 2]);
 
-    // cheap bound: nothing on this segment can reach a face whose centroid is
-    // farther than (half the segment length + cutoff + face radius) away.
     const Eigen::Vector3d segMid = 0.5 * (p0 + p1);
     const double segReach = 0.5 * (p1 - p0).norm() + cutoff;
 
@@ -804,8 +704,7 @@ long mem3dg_system_filament_repulsion(mem3dg_system *h, const double *seg_p0,
                                                  Eigen::Vector3d(b.x, b.y, b.z),
                                                  Eigen::Vector3d(c.x, c.y, c.z)};
 
-      // quick reject on centroid distance; the face's own extent is bounded by
-      // its longest edge, so add that before comparing
+  
       const Eigen::Vector3d ctr = (fv[0] + fv[1] + fv[2]) / 3.0;
       const double faceRad =
           std::max({(fv[0] - ctr).norm(), (fv[1] - ctr).norm(),
@@ -822,13 +721,6 @@ long mem3dg_system_filament_repulsion(mem3dg_system *h, const double *seg_p0,
 
       ++nContacts;
 
-      /*
-       Direction: from the membrane contact point towards the segment, so the
-       filament is pushed away from the surface.  When the segment pierces the
-       face the two contact points coincide (d == 0) and that direction is
-       undefined; fall back to the face normal, which is the only meaningful
-       "away" there.
-       */
       Eigen::Vector3d nhat;
       if (d > 1e-12) {
         nhat = (ct.pSeg - ct.pFace) / d;
